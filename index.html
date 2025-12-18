@@ -1,0 +1,730 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Smart City Issue Reporter</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,400,500,700&display=swap" />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/icon?family=Material+Icons" />
+  <script src="https://unpkg.com/@mui/material@5.14.0/umd/material-ui.production.min.js"></script>
+  <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyBavJdf_YJwNK0IsqyF56KpHbySFxCPfJ8&libraries=places"></script>
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <script src="https://unpkg.com/jwt-decode@3.1.2/build/jwt-decode.js"></script>
+  <style>
+    body { margin: 0; padding: 0; font-family: 'Roboto', sans-serif; }
+    * { box-sizing: border-box; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+    const { 
+      ThemeProvider, createTheme, CssBaseline,
+      Box, Container, Paper, TextField, Button, Typography,
+      AppBar, Toolbar, IconButton, Card, CardContent, CardMedia,
+      Chip, Select, MenuItem, FormControl, InputLabel, CircularProgress,
+      Avatar, Divider, List, ListItem, ListItemText, ListItemButton,
+      Alert, Snackbar, Badge
+    } = MaterialUI;
+
+    const ISSUE_TYPES = ['Pothole','Garbage','Streetlight Fault','Broken Sidewalk','Water Leak','Graffiti','Traffic Light Issue','Other'];
+    const CLIENT_ID = '132041657750-dnt4u45rt29p4rg9kqpkp2708tquusa6.apps.googleusercontent.com';
+
+    // Mock storage with localStorage (no backend needed)
+    const storage = {
+      get: async (key) => ({ value: localStorage.getItem(key) }),
+      set: async (key, value) => { localStorage.setItem(key, value); return { success: true }; },
+      delete: async (key) => { localStorage.removeItem(key); return { success: true }; }
+    };
+
+    const STORAGE_KEYS = {
+      USERS: 'smart-city-users',
+      ISSUES: 'smart-city-issues',
+      CURRENT_USER: 'smart-city-current-user'
+    };
+
+    // Smooth animated theme
+    const getTheme = (mode) => createTheme({
+      palette: {
+        mode: mode === 'system' 
+          ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+          : mode,
+        primary: { main: '#90caf9' },
+        secondary: { main: '#f48fb1' },
+        background: {
+          default: mode === 'light' ? '#f5f5f5' : '#121212',
+          paper: mode === 'light' ? '#ffffff' : '#1e1e1e',
+        },
+        text: { primary: mode === 'light' ? '#000000' : '#ffffff', secondary: mode === 'light' ? '#666666' : '#b0b0b0' }
+      },
+      components: {
+        MuiPaper: { styleOverrides: { root: { backgroundImage: 'none' } } },
+        MuiCssBaseline: {
+          styleOverrides: {
+            body: { transition: 'background-color 0.4s ease, color 0.4s ease' },
+            '*': { transition: 'background-color 0.4s ease, color 0.4s ease, border-color 0.4s ease, box-shadow 0.4s ease' },
+            '.MuiPaper-root, .MuiCard-root, .MuiButton-root': { transition: 'all 0.4s ease' },
+          }
+        }
+      }
+    });
+
+    function SmartCityApp() {
+      const [currentScreen, setCurrentScreen] = useState('login');
+      const [currentUser, setCurrentUser] = useState(null);
+      const [loginForm, setLoginForm] = useState({ email: '', password: '' });
+      const [signupForm, setSignupForm] = useState({ email: '', password: '', confirmPassword: '' });
+      const [signupErrors, setSignupErrors] = useState({});
+      const [newReport, setNewReport] = useState({ type: '', photo: null, photoPreview: null, location: null });
+      const [issues, setIssues] = useState([]);
+      const [selectedIssue, setSelectedIssue] = useState(null);
+      const [error, setError] = useState('');
+      const [success, setSuccess] = useState('');
+      const [isLoading, setIsLoading] = useState(true);
+      const [gettingLocation, setGettingLocation] = useState(false);
+      const [map, setMap] = useState(null);
+      const [markers, setMarkers] = useState([]);
+      const [googleLoaded, setGoogleLoaded] = useState(false);
+      const [themeMode, setThemeMode] = useState('dark');
+
+      const theme = getTheme(themeMode);
+
+      // Theme handling
+      useEffect(() => {
+        const saved = localStorage.getItem('smartcity-theme');
+        if (saved && ['light','dark','system'].includes(saved)) setThemeMode(saved);
+      }, []);
+      useEffect(() => {
+        localStorage.setItem('smartcity-theme', themeMode);
+        if (themeMode === 'system') {
+          const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+          const handler = () => setThemeMode('system');
+          mediaQuery.addEventListener('change', handler);
+          return () => mediaQuery.removeEventListener('change', handler);
+        }
+      }, [themeMode]);
+
+      // Google Sign-In
+      useEffect(() => {
+        const script = document.querySelector('script[src="https://accounts.google.com/gsi/client"]');
+        const handler = () => setGoogleLoaded(true);
+        if (window.google?.accounts) handler();
+        else if (script) script.addEventListener('load', handler);
+        return () => script?.removeEventListener('load', handler);
+      }, []);
+
+      useEffect(() => {
+        if (googleLoaded && currentScreen === 'login' && document.getElementById('google-signin-button')) {
+          window.google.accounts.id.initialize({ client_id: CLIENT_ID, callback: handleGoogleSignIn });
+          window.google.accounts.id.renderButton(document.getElementById('google-signin-button'),
+            { theme: 'outline', size: 'large', text: 'signin_with', shape: 'rectangular', width: 400 }
+          );
+        }
+      }, [googleLoaded, currentScreen]);
+
+      // Map initialization
+      useEffect(() => {
+        if (currentScreen === 'adminDashboard' && issues.length > 0) initializeMap();
+      }, [currentScreen, issues]);
+
+      const handleGoogleSignIn = async (response) => {
+        try {
+          const userObject = jwt_decode(response.credential);
+          let users = [];
+          const usersResult = await storage.get(STORAGE_KEYS.USERS);
+          users = usersResult?.value ? JSON.parse(usersResult.value) : [];
+          let user = users.find(u => u.email === userObject.email);
+          if (!user) {
+            user = { email: userObject.email, role: userObject.email === 'admin@smartcity.com' ? 'admin' : 'user' };
+            users.push(user);
+            await storage.set(STORAGE_KEYS.USERS, JSON.stringify(users));
+          }
+          setCurrentUser(user);
+          await storage.set(STORAGE_KEYS.CURRENT_USER, JSON.stringify(user));
+          setCurrentScreen(user.role === 'admin' ? 'adminDashboard' : 'home');
+          setSuccess('Logged in with Google!');
+        } catch (err) {
+          setError('Google login failed: ' + err.message);
+        }
+      };
+
+      const initializeMap = () => {
+        const mapElement = document.getElementById('google-map');
+        if (!mapElement || !window.google) return;
+
+        const center = issues.length > 0 && typeof issues[0].location !== 'string'
+          ? { lat: issues[0].location.lat, lng: issues[0].location.lng }
+          : { lat: 17.4399, lng: 78.4983 };
+
+        const newMap = new window.google.maps.Map(mapElement, {
+          center, zoom: 12, styles: [{ featureType: 'poi', elementType: 'labels', stylers: [{ visibility: 'off' }] }]
+        });
+
+        setMap(newMap);
+
+        const newMarkers = issues.filter(issue => typeof issue.location !== 'string').map(issue => {
+          const marker = new window.google.maps.Marker({
+            position: { lat: issue.location.lat, lng: issue.location.lng },
+            map: newMap,
+            title: issue.type,
+            icon: { url: `http://maps.google.com/mapfiles/ms/icons/${issue.status === 'New' ? 'blue' : issue.status === 'In Progress' ? 'yellow' : 'green'}-dot.png` }
+          });
+
+          const infoWindow = new window.google.maps.InfoWindow({
+            content: `<div style="padding: 8px;"><h3 style="margin: 0 0 8px 0; font-size: 16px; font-weight: bold;">${issue.type}</h3><p style="margin: 0; font-size: 14px; color: #666;">Status: ${issue.status}</p><p style="margin: 4px 0 0 0; font-size: 12px; color: #999;">By: ${issue.reportedBy}</p></div>`
+          });
+
+          marker.addListener('click', () => infoWindow.open(newMap, marker));
+          return marker;
+        });
+
+        setMarkers(newMarkers);
+      };
+
+      const loadData = async () => {
+        try {
+          let users = [];
+          const usersResult = await storage.get(STORAGE_KEYS.USERS);
+          if (usersResult?.value) users = JSON.parse(usersResult.value);
+
+          const hasAdmin = users.some(u => u.email === 'admin@smartcity.com');
+          const hasUser = users.some(u => u.email === 'user@example.com');
+          if (!hasAdmin) users.push({ email: 'admin@smartcity.com', password: 'admin123', role: 'admin' });
+          if (!hasUser) users.push({ email: 'user@example.com', password: 'user123', role: 'user' });
+          if (!hasAdmin || !hasUser || !usersResult?.value) await storage.set(STORAGE_KEYS.USERS, JSON.stringify(users));
+
+          const userResult = await storage.get(STORAGE_KEYS.CURRENT_USER);
+          if (userResult?.value) {
+            const user = JSON.parse(userResult.value);
+            setCurrentUser(user);
+            setCurrentScreen(user.role === 'admin' ? 'adminDashboard' : 'home');
+          }
+
+          const issuesResult = await storage.get(STORAGE_KEYS.ISSUES);
+          if (issuesResult?.value) setIssues(JSON.parse(issuesResult.value));
+        } catch (err) { console.error('Error loading data:', err); }
+        finally { setIsLoading(false); }
+      };
+
+      const handleLogin = async () => {
+        try {
+          setError('');
+          const usersResult = await storage.get(STORAGE_KEYS.USERS);
+          const users = usersResult?.value ? JSON.parse(usersResult.value) : [];
+          const user = users.find(u => u.email === loginForm.email && u.password === loginForm.password);
+          if (user) {
+            setCurrentUser(user);
+            await storage.set(STORAGE_KEYS.CURRENT_USER, JSON.stringify(user));
+            setCurrentScreen(user.role === 'admin' ? 'adminDashboard' : 'home');
+            setLoginForm({ email: '', password: '' });
+            setSuccess('Login successful!');
+          } else {
+            setError('Invalid email or password');
+          }
+        } catch (err) {
+          setError('Login failed: ' + err.message);
+        }
+      };
+
+      const validateSignupForm = () => {
+        const errors = {};
+        if (!signupForm.email) errors.email = 'Email is required';
+        else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(signupForm.email)) errors.email = 'Please enter a valid email';
+        if (!signupForm.password) errors.password = 'Password is required';
+        else if (signupForm.password.length < 6) errors.password = 'Password must be at least 6 characters';
+        if (!signupForm.confirmPassword) errors.confirmPassword = 'Please confirm your password';
+        else if (signupForm.password !== signupForm.confirmPassword) errors.confirmPassword = 'Passwords do not match';
+        setSignupErrors(errors);
+        return Object.keys(errors).length === 0;
+      };
+
+      const handleSignup = async () => {
+        try {
+          setSignupErrors({});
+          if (!validateSignupForm()) return;
+          const usersResult = await storage.get(STORAGE_KEYS.USERS);
+          let users = usersResult?.value ? JSON.parse(usersResult.value) : [];
+          if (users.find(u => u.email === signupForm.email)) {
+            setSignupErrors({ email: 'This email is already registered' });
+            return;
+          }
+          const newUser = { email: signupForm.email, password: signupForm.password, role: 'user' };
+          users.push(newUser);
+          await storage.set(STORAGE_KEYS.USERS, JSON.stringify(users));
+          setCurrentUser(newUser);
+          await storage.set(STORAGE_KEYS.CURRENT_USER, JSON.stringify(newUser));
+          setCurrentScreen('home');
+          setSignupForm({ email: '', password: '', confirmPassword: '' });
+          setSignupErrors({});
+          setSuccess('Account created successfully!');
+        } catch (err) {
+          setSignupErrors({ form: 'Signup failed. Please try again.' });
+        }
+      };
+
+      const handleLogout = async () => {
+        try {
+          await storage.delete(STORAGE_KEYS.CURRENT_USER);
+          setCurrentUser(null);
+          setCurrentScreen('login');
+          setSuccess('Logged out successfully');
+        } catch (err) {
+          console.error('Logout error:', err);
+        }
+      };
+
+      const getCurrentLocation = () => {
+        setGettingLocation(true);
+        setError('');
+        if (!navigator.geolocation) {
+          setError('Geolocation not supported. Using default location.');
+          setNewReport(prev => ({ ...prev, location: { lat: 17.4399, lng: 78.4983, address: 'Secunderabad, Telangana, IN' } }));
+          setGettingLocation(false);
+          return;
+        }
+        navigator.geolocation.getCurrentPosition(
+          position => {
+            const { latitude, longitude } = position.coords;
+            if (window.google?.maps) {
+              const geocoder = new window.google.maps.Geocoder();
+              geocoder.geocode({ location: { lat: latitude, lng: longitude } }, (results, status) => {
+                setNewReport(prev => ({
+                  ...prev,
+                  location: {
+                    lat: latitude,
+                    lng: longitude,
+                    address: status === 'OK' && results[0] ? results[0].formatted_address : `${latitude.toFixed(6)}, ${longitude.toFixed(6)}`
+                  }
+                }));
+                setGettingLocation(false);
+                setSuccess('Location captured successfully!');
+              });
+            } else {
+              setNewReport(prev => ({
+                ...prev,
+                location: { lat: latitude, lng: longitude, address: `${latitude.toFixed(6)}, ${longitude.toFixed(6)}` }
+              }));
+              setGettingLocation(false);
+              setSuccess('Location captured successfully!');
+            }
+          },
+          () => {
+            setError('Unable to get location. Using default.');
+            setNewReport(prev => ({ ...prev, location: { lat: 17.4399, lng: 78.4983, address: 'Secunderabad, Telangana, IN' } }));
+            setGettingLocation(false);
+          },
+          { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+        );
+      };
+
+      const handlePhotoUpload = e => {
+        const file = e.target.files[0];
+        if (file) {
+          const reader = new FileReader();
+          reader.onloadend = () => setNewReport(prev => ({ ...prev, photo: file.name, photoPreview: reader.result }));
+          reader.readAsDataURL(file);
+        }
+      };
+
+      const handleSubmitReport = async () => {
+        try {
+          if (!newReport.type || !newReport.photo) {
+            setError('Please fill in all fields and upload a photo');
+            return;
+          }
+          const newIssue = {
+            id: Date.now().toString(),
+            type: newReport.type,
+            photo: newReport.photoPreview,
+            location: newReport.location || { lat: 17.4399, lng: 78.4983, address: 'Secunderabad, Telangana, IN' },
+            status: 'New',
+            reportedBy: currentUser.email,
+            createdAt: new Date().toISOString()
+          };
+          const issuesResult = await storage.get(STORAGE_KEYS.ISSUES);
+          const updatedIssues = issuesResult?.value ? [...JSON.parse(issuesResult.value), newIssue] : [newIssue];
+          setIssues(updatedIssues);
+          await storage.set(STORAGE_KEYS.ISSUES, JSON.stringify(updatedIssues));
+          setNewReport({ type: '', photo: null, photoPreview: null, location: null });
+          setError('');
+          setSuccess('Issue reported successfully!');
+          setCurrentScreen('home');
+        } catch (err) {
+          setError('Failed to submit report. Please try again.');
+        }
+      };
+
+      const handleUpdateStatus = async (issueId, newStatus) => {
+        try {
+          const updatedIssues = issues.map(issue => issue.id === issueId ? { ...issue, status: newStatus } : issue);
+          setIssues(updatedIssues);
+          await storage.set(STORAGE_KEYS.ISSUES, JSON.stringify(updatedIssues));
+          setSuccess('Status updated successfully!');
+        } catch (err) {
+          setError('Failed to update status: ' + err.message);
+        }
+      };
+
+      const ThemeToggle = () => (
+        <Box sx={{ display: 'flex', alignItems: 'center', bgcolor: 'background.paper', borderRadius: 8, p: 0.5 }}>
+          <IconButton size="small" onClick={() => setThemeMode('light')} color={themeMode === 'light' ? 'primary' : 'inherit'}>
+            <span className="material-icons">light_mode</span>
+          </IconButton>
+          <IconButton size="small" onClick={() => setThemeMode('system')} color={themeMode === 'system' ? 'primary' : 'inherit'}>
+            <span className="material-icons">brightness_auto</span>
+          </IconButton>
+          <IconButton size="small" onClick={() => setThemeMode('dark')} color={themeMode === 'dark' ? 'primary' : 'inherit'}>
+            <span className="material-icons">dark_mode</span>
+          </IconButton>
+        </Box>
+      );
+
+      const AppBarWithTheme = ({ title, showBack, onBack }) => (
+        <AppBar position="static">
+          <Toolbar>
+            {showBack && <IconButton edge="start" color="inherit" onClick={onBack || (() => setCurrentScreen('home'))}><span className="material-icons">arrow_back</span></IconButton>}
+            <span className="material-icons" style={{ marginRight: 12, marginLeft: showBack ? 0 : 16 }}>
+              {currentScreen === 'adminDashboard' ? 'admin_panel_settings' : 'location_city'}
+            </span>
+            <Typography variant="h6" sx={{ flexGrow: 1 }}>{title}</Typography>
+            <ThemeToggle />
+            <IconButton color="inherit" onClick={handleLogout} sx={{ ml: 1 }}><span className="material-icons">logout</span></IconButton>
+          </Toolbar>
+        </AppBar>
+      );
+
+      useEffect(() => { loadData(); }, []);
+
+      if (isLoading) {
+        return (
+          <ThemeProvider theme={theme}>
+            <CssBaseline />
+            <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh' }}>
+              <CircularProgress />
+            </Box>
+          </ThemeProvider>
+        );
+      }
+
+      if (currentScreen === 'login') {
+        return (
+          <ThemeProvider theme={theme}>
+            <CssBaseline />
+            <Container maxWidth="sm" sx={{ minHeight: '100vh', display: 'flex', alignItems: 'center', py: 4 }}>
+              <Paper elevation={3} sx={{ p: 4, width: '100%', borderRadius: 3 }}>
+                <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', mb: 3 }}>
+                  <Avatar sx={{ width: 64, height: 64, bgcolor: 'primary.main', mb: 2 }}>
+                    <span className="material-icons" style={{ fontSize: 40 }}>location_city</span>
+                  </Avatar>
+                  <Typography variant="h4" fontWeight="bold" textAlign="center">Smart City</Typography>
+                  <Typography variant="h5" color="text.secondary" textAlign="center">Issue Reporter</Typography>
+                </Box>
+                <Box component="form" sx={{ mt: 3 }}>
+                  <TextField
+                    fullWidth label="Email" type="email" value={loginForm.email}
+                    onChange={e => setLoginForm(prev => ({ ...prev, email: e.target.value }))}
+                    margin="normal" variant="outlined"
+                  />
+                  <TextField
+                    fullWidth label="Password" type="password" value={loginForm.password}
+                    onChange={e => setLoginForm(prev => ({ ...prev, password: e.target.value }))}
+                    onKeyPress={e => e.key === 'Enter' && handleLogin()}
+                    margin="normal" variant="outlined"
+                  />
+                  <Button fullWidth variant="contained" size="large" onClick={handleLogin} sx={{ mt: 3, mb: 2, py: 1.5 }}>Log in</Button>
+                  <Button fullWidth variant="text" onClick={() => setCurrentScreen('signup')}>Sign up</Button>
+                  <Divider sx={{ my: 2 }}><Typography variant="body2" color="text.secondary" align="center">or</Typography></Divider>
+                  <Box sx={{ mt: 2, display: 'flex', justifyContent: 'center' }}>
+                    <div id="google-signin-button" style={{ width: '100%' }}></div>
+                  </Box>
+                </Box>
+                <Typography variant="caption" color="text.secondary" textAlign="center" display="block" sx={{ mt: 3 }}>
+                  Demo: admin@smartcity.com / admin123 or user@example.com / user123
+                </Typography>
+              </Paper>
+            </Container>
+            <Snackbar open={!!error} autoHideDuration={6000} onClose={() => setError('')}>
+              <Alert severity="error" onClose={() => setError('')}>{error}</Alert>
+            </Snackbar>
+            <Snackbar open={!!success} autoHideDuration={3000} onClose={() => setSuccess('')}>
+              <Alert severity="success" onClose={() => setSuccess('')}>{success}</Alert>
+            </Snackbar>
+          </ThemeProvider>
+        );
+      }
+
+      if (currentScreen === 'signup') {
+        return (
+          <ThemeProvider theme={theme}>
+            <CssBaseline />
+            <Container maxWidth="sm" sx={{ minHeight: '100vh', display: 'flex', alignItems: 'center', py: 4 }}>
+              <Paper elevation={3} sx={{ p: 4, width: '100%', borderRadius: 3 }}>
+                <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', mb: 3 }}>
+                  <Avatar sx={{ width: 64, height: 64, bgcolor: 'primary.main', mb: 2 }}>
+                    <span className="material-icons" style={{ fontSize: 40 }}>person_add</span>
+                  </Avatar>
+                  <Typography variant="h4" fontWeight="bold" textAlign="center">Create Account</Typography>
+                  <Typography variant="body2" color="text.secondary" textAlign="center" sx={{ mt: 1 }}>Join Smart City Reporter</Typography>
+                </Box>
+                {signupErrors.form && <Alert severity="error" sx={{ mb: 2 }}>{signupErrors.form}</Alert>}
+                <Box component="form" sx={{ mt: 3 }} onSubmit={e => e.preventDefault()}>
+                  <TextField
+                    fullWidth label="Email" type="email" value={signupForm.email}
+                    onChange={e => { setSignupForm(prev => ({ ...prev, email: e.target.value })); setSignupErrors(prev => ({ ...prev, email: '' })); }}
+                    margin="normal" variant="outlined" error={!!signupErrors.email} helperText={signupErrors.email}
+                  />
+                  <TextField
+                    fullWidth label="Password" type="password" value={signupForm.password}
+                    onChange={e => { setSignupForm(prev => ({ ...prev, password: e.target.value })); setSignupErrors(prev => ({ ...prev, password: '' })); }}
+                    margin="normal" variant="outlined" error={!!signupErrors.password} helperText={signupErrors.password}
+                  />
+                  <TextField
+                    fullWidth label="Confirm Password" type="password" value={signupForm.confirmPassword}
+                    onChange={e => { setSignupForm(prev => ({ ...prev, confirmPassword: e.target.value })); setSignupErrors(prev => ({ ...prev, confirmPassword: '' })); }}
+                    margin="normal" variant="outlined" error={!!signupErrors.confirmPassword} helperText={signupErrors.confirmPassword}
+                  />
+                  <Button fullWidth variant="contained" size="large" onClick={handleSignup} sx={{ mt: 3, mb: 2, py: 1.5 }}>Create Account</Button>
+                  <Button fullWidth variant="text" onClick={() => { setCurrentScreen('login'); setSignupForm({ email: '', password: '', confirmPassword: '' }); setSignupErrors({}); }}>Back to Login</Button>
+                </Box>
+              </Paper>
+            </Container>
+            <Snackbar open={!!error} autoHideDuration={6000} onClose={() => setError('')}>
+              <Alert severity="error" onClose={() => setError('')}>{error}</Alert>
+            </Snackbar>
+            <Snackbar open={!!success} autoHideDuration={3000} onClose={() => setSuccess('')}>
+              <Alert severity="success" onClose={() => setSuccess('')}>{success}</Alert>
+            </Snackbar>
+          </ThemeProvider>
+        );
+      }
+
+      if (currentScreen === 'home') {
+        const userIssueCount = issues.filter(issue => issue.reportedBy === currentUser.email).length;
+        return (
+          <ThemeProvider theme={theme}>
+            <CssBaseline />
+            <Box sx={{ minHeight: '100vh', bgcolor: 'background.default' }}>
+              <AppBarWithTheme title="Smart City Reporter" />
+              <Container maxWidth="sm" sx={{ py: 4 }}>
+                <Paper elevation={2} sx={{ p: 4, textAlign: 'center', mb: 3 }}>
+                  <Avatar sx={{ width: 80, height: 80, bgcolor: 'primary.main', mx: 'auto', mb: 2 }}>
+                    <span className="material-icons" style={{ fontSize: 48 }}>account_circle</span>
+                  </Avatar>
+                  <Typography variant="h5" gutterBottom>Welcome back!</Typography>
+                  <Typography variant="body2" color="text.secondary">{currentUser.email}</Typography>
+                </Paper>
+                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  <Button
+                    variant="contained" size="large" startIcon={<span className="material-icons">add_circle</span>}
+                    onClick={() => setCurrentScreen('newReport')} sx={{ py: 2 }}
+                  >Report New Issue</Button>
+                  <Button
+                    variant="outlined" size="large"
+                    startIcon={<Badge badgeContent={userIssueCount} color="primary"><span className="material-icons">history</span></Badge>}
+                    onClick={() => setCurrentScreen('history')} sx={{ py: 2 }}
+                  >My Reports</Button>
+                </Box>
+              </Container>
+            </Box>
+            <Snackbar open={!!success} autoHideDuration={3000} onClose={() => setSuccess('')}>
+              <Alert severity="success" onClose={() => setSuccess('')}>{success}</Alert>
+            </Snackbar>
+          </ThemeProvider>
+        );
+      }
+
+      if (currentScreen === 'newReport') {
+        return (
+          <ThemeProvider theme={theme}>
+            <CssBaseline />
+            <Box sx={{ minHeight: '100vh', bgcolor: 'background.default' }}>
+              <AppBarWithTheme title="New Report" showBack onBack={() => setCurrentScreen('home')} />
+              <Container maxWidth="sm" sx={{ py: 4 }}>
+                <Paper elevation={2} sx={{ p: 3 }}>
+                  <Box sx={{ mb: 3 }}>
+                    <input accept="image/*" style={{ display: 'none' }} id="photo-upload" type="file" onChange={handlePhotoUpload} />
+                    <label htmlFor="photo-upload">
+                      <Box sx={{ border: '2px dashed', borderColor: 'primary.main', borderRadius: 2, p: 4, textAlign: 'center', cursor: 'pointer', '&:hover': { bgcolor: 'action.hover' } }}>
+                        {newReport.photoPreview ? (
+                          <img src={newReport.photoPreview} alt="Preview" style={{ maxHeight: 200, borderRadius: 8 }} />
+                        ) : (
+                          <Box>
+                            <span className="material-icons" style={{ fontSize: 64, color: '#1976d2' }}>cloud_upload</span>
+                            <Typography variant="body1" color="primary" sx={{ mt: 1 }}>Upload a photo</Typography>
+                          </Box>
+                        )}
+                      </Box>
+                    </label>
+                  </Box>
+                  <Button
+                    fullWidth variant="outlined" startIcon={<span className="material-icons">my_location</span>}
+                    onClick={getCurrentLocation} disabled={gettingLocation} sx={{ mb: 3 }}
+                  >
+                    {gettingLocation ? 'Getting location...' : newReport.location ? '✓ ' + newReport.location.address : 'Get Current Location'}
+                  </Button>
+                  <FormControl fullWidth sx={{ mb: 3 }}>
+                    <InputLabel>Issue Type</InputLabel>
+                    <Select value={newReport.type} label="Issue Type" onChange={e => setNewReport(prev => ({ ...prev, type: e.target.value }))}>
+                      {ISSUE_TYPES.map(type => <MenuItem key={type} value={type}>{type}</MenuItem>)}
+                    </Select>
+                  </FormControl>
+                  <Button fullWidth variant="contained" size="large" onClick={handleSubmitReport} sx={{ mb: 2 }}>Submit Report</Button>
+                  <Button
+                    fullWidth variant="text"
+                    onClick={() => { setCurrentScreen('home'); setNewReport({ type: '', photo: null, photoPreview: null, location: null }); setError(''); }}
+                  >Cancel</Button>
+                </Paper>
+              </Container>
+            </Box>
+            <Snackbar open={!!error} autoHideDuration={6000} onClose={() => setError('')}>
+              <Alert severity="error" onClose={() => setError('')}>{error}</Alert>
+            </Snackbar>
+            <Snackbar open={!!success} autoHideDuration={3000} onClose={() => setSuccess('')}>
+              <Alert severity="success" onClose={() => setSuccess('')}>{success}</Alert>
+            </Snackbar>
+          </ThemeProvider>
+        );
+      }
+
+      if (currentScreen === 'issueDetails' && selectedIssue) {
+        return (
+          <ThemeProvider theme={theme}>
+            <CssBaseline />
+            <Box sx={{ minHeight: '100vh', bgcolor: 'background.default' }}>
+              <AppBarWithTheme title="Issue Details" showBack onBack={() => { setSelectedIssue(null); setCurrentScreen('history'); }} />
+              <Container maxWidth="sm" sx={{ py: 4 }}>
+                <Card elevation={2}>
+                  <CardMedia component="img" height="300" image={selectedIssue.photo} alt={selectedIssue.type} />
+                  <CardContent>
+                    <Typography variant="h5" component="div" gutterBottom>{selectedIssue.type}</Typography>
+                    <Divider sx={{ my: 2 }} />
+                    <Box sx={{ mb: 2 }}>
+                      <Typography variant="subtitle2" color="text.secondary">Location</Typography>
+                      <Typography variant="body1">
+                        <span className="material-icons" style={{ fontSize: 16, verticalAlign: 'middle', marginRight: 4 }}>place</span>
+                        {typeof selectedIssue.location === 'string' ? selectedIssue.location : selectedIssue.location.address}
+                      </Typography>
+                    </Box>
+                    <Box>
+                      <Typography variant="subtitle2" color="text.secondary" gutterBottom>Status</Typography>
+                      <Chip
+                        label={selectedIssue.status}
+                        color={selectedIssue.status === 'New' ? 'primary' : selectedIssue.status === 'In Progress' ? 'warning' : 'success'}
+                      />
+                    </Box>
+                  </CardContent>
+                </Card>
+              </Container>
+            </Box>
+          </ThemeProvider>
+        );
+      }
+
+      if (currentScreen === 'history') {
+        const userIssues = issues.filter(issue => issue.reportedBy === currentUser.email);
+        return (
+          <ThemeProvider theme={theme}>
+            <CssBaseline />
+            <Box sx={{ minHeight: '100vh', bgcolor: 'background.default' }}>
+              <AppBarWithTheme title="My Reports" showBack onBack={() => setCurrentScreen('home')} />
+              <Container maxWidth="md" sx={{ py: 4 }}>
+                {userIssues.length === 0 ? (
+                  <Paper elevation={2} sx={{ p: 4, textAlign: 'center' }}>
+                    <span className="material-icons" style={{ fontSize: 64, color: '#ccc' }}>inbox</span>
+                    <Typography variant="h6" color="text.secondary" sx={{ mt: 2 }}>No issues reported yet</Typography>
+                  </Paper>
+                ) : (
+                  <List sx={{ bgcolor: 'background.paper' }}>
+                    {userIssues.map(issue => (
+                      <React.Fragment key={issue.id}>
+                        <ListItemButton onClick={() => { setSelectedIssue(issue); setCurrentScreen('issueDetails'); }}>
+                          <ListItemText primary={issue.type} secondary={typeof issue.location === 'string' ? issue.location : issue.location.address} />
+                          <Chip
+                            label={issue.status} size="small"
+                            color={issue.status === 'New' ? 'primary' : issue.status === 'In Progress' ? 'warning' : 'success'}
+                          />
+                        </ListItemButton>
+                        <Divider />
+                      </React.Fragment>
+                    ))}
+                  </List>
+                )}
+              </Container>
+            </Box>
+          </ThemeProvider>
+        );
+      }
+
+      if (currentScreen === 'adminDashboard') {
+        return (
+          <ThemeProvider theme={theme}>
+            <CssBaseline />
+            <Box sx={{ minHeight: '100vh', bgcolor: 'background.default' }}>
+              <AppBarWithTheme title="Admin Dashboard" />
+              <Container maxWidth="lg" sx={{ py: 4 }}>
+                <Paper elevation={2} sx={{ p: 3, mb: 3 }}>
+                  <Typography variant="h6" gutterBottom>Issue Map</Typography>
+                  <Box id="google-map" sx={{ width: '100%', height: 400, borderRadius: 1, bgcolor: 'grey.200' }} />
+                </Paper>
+                <Typography variant="h6" gutterBottom>All Reports</Typography>
+                {issues.length === 0 ? (
+                  <Paper elevation={2} sx={{ p: 4, textAlign: 'center' }}>
+                    <Typography color="text.secondary">No issues reported yet</Typography>
+                  </Paper>
+                ) : (
+                  <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                    {issues.map(issue => (
+                      <Card key={issue.id} elevation={2}>
+                        <CardContent>
+                          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', mb: 2 }}>
+                            <Box sx={{ flex: 1 }}>
+                              <Typography variant="h6" component="div">{issue.type}</Typography>
+                              <Typography variant="body2" color="text.secondary">
+                                <span className="material-icons" style={{ fontSize: 14, verticalAlign: 'middle', marginRight: 4 }}>place</span>
+                                {typeof issue.location === 'string' ? issue.location : issue.location.address}
+                              </Typography>
+                              <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
+                                Reported by: {issue.reportedBy}
+                              </Typography>
+                            </Box>
+                            <FormControl sx={{ minWidth: 140 }}>
+                              <Select
+                                value={issue.status} size="small"
+                                onChange={e => handleUpdateStatus(issue.id, e.target.value)}
+                              >
+                                <MenuItem value="New">New</MenuItem>
+                                <MenuItem value="In Progress">In Progress</MenuItem>
+                                <MenuItem value="Resolved">Resolved</MenuItem>
+                              </Select>
+                            </FormControl>
+                          </Box>
+                          <Chip
+                            label={issue.status} size="small"
+                            color={issue.status === 'New' ? 'primary' : issue.status === 'In Progress' ? 'warning' : 'success'}
+                          />
+                        </CardContent>
+                      </Card>
+                    ))}
+                  </Box>
+                )}
+              </Container>
+            </Box>
+            <Snackbar open={!!success} autoHideDuration={3000} onClose={() => setSuccess('')}>
+              <Alert severity="success" onClose={() => setSuccess('')}>{success}</Alert>
+            </Snackbar>
+          </ThemeProvider>
+        );
+      }
+
+      return null;
+    }
+
+    ReactDOM.render(<SmartCityApp />, document.getElementById('root'));
+  </script>
+</body>
+</html>
